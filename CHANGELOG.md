@@ -5,6 +5,10 @@ Usuários do plugin só recebem atualização quando `version` muda.
 
 ## [Unreleased]
 
+### Adicionado
+
+- `reference/ferramentas-mcp.json`: entrada da **Mesa**, gerenciador local de projetos com servidor MCP (`mcp__mesa__*`). Hierarquia Pasta/Lista/Tarefa com card de Iniciativa e de Epic, status do Workflow TRUE e busca do card pelo `cardTaskId`. Sem ela, `gabarito-instalar --vincular` não tem instrução de busca quando `fluxo.mcp` é `mesa`.
+
 ## [1.1.0] — 2026-09-25
 
 Camada de fluxo (Workflow TRUE: Flight Levels + Kanban), onboarding na instalação, versionamento trunk-based como gate,
