@@ -4,9 +4,9 @@ Item sai daqui quando entra num plano ou a decisão de descarte é registrada. I
 
 | Item | Origem | Gatilho |
 |---|---|---|
-| Escrita na ferramenta de planejamento como default (hoje só com `fluxo.escrita: true`, ADR-FLX-2) | spec 2026-09-24 Workflow TRUE, "Fora de escopo" — dono: Gabriel | 3 repos do time com escrita autorizada e sem incidente |
+| Escrita na ferramenta de planejamento como default (hoje só com `fluxo.escrita: true`, ADR-FLX-2) | spec 2026-09-24 (design do fluxo da 1.1.0), "Fora de escopo" — dono: Gabriel | 3 repos do time com escrita autorizada e sem incidente |
 | Adaptador de escrita por ferramenta (criar card a partir do plano) | idem — dono: Gabriel | primeiro PBI que precisar abrir card a partir do plano |
-| Métricas de fluxo (lead time, throughput, envelhecimento agregado) calculadas pelo harness | idem — dono: Gabriel | fase 2 do Workflow TRUE |
+| Métricas de fluxo (lead time, throughput, envelhecimento agregado) calculadas pelo harness | idem — dono: Gabriel | fase 2 do Fluxo Gabarito |
 | Bloqueio de prompt inline via `UserPromptSubmit` exit 2 (hoje só lembrete, ORQ-4) | idem — dono: Gabriel | R21 violada 3× no piloto |
 | Isolamento remoto como default de dispatch | idem — dono: Gabriel | máquina do piloto em `slots: 1` em mais de 50% das sessões |
 | Abordagem B — harness reescrito por altitude (2.0.0) | idem (D6) — dono: Gabriel | 3 achados de conformidade por confusão de conceito |
@@ -25,3 +25,25 @@ Item sai daqui quando entra num plano ou a decisão de descarte é registrada. I
 | Conector ClickUp (`clickup_get_workspace_hierarchy`) quebra a leitura da hierarquia completa quando há um espaço sem `name` (defeito externo; contorno medido: paginar) | ledger GM-6, M14 (l.40.1) — dono: Gabriel | próxima falha do conector observada num repo do time |
 | Onboarding sem caminho explícito para Iniciativas reais que não seguem Folder/List/Task (a skill não presume; a M14 encerrou aqui por decisão do usuário) | ledger GM-6, M14 (l.38, l.40.2) — dono: Gabriel | onboarding para Iniciativas que não seguem Folder/List/Task |
 | Validação completa da M14 em sessão limpa (inclui `settings.json` com os 2 oks e `--vincular` com PBI real do ClickUp) — a M14 medida prova as regras da skill, não a experiência de uma sessão nova (ruling F6-R9) | ledger GM-6, M14 (l.37, l.40.3) — dono: Gabriel | primeiro onboarding real |
+| Teto de latência da guarda no CI depende da máquina (p95 ≤ 60 ms local, ≤ 150 ms CI) — calibrar por runner | review Fable spec E1 r0, MINOR 22 — dono: Gabriel | 1º falso vermelho por p95 no CI |
+| Falsos negativos conhecidos do classificador Bash por primeiro token (`X=rm; $X -rf`, `base64 -d \| sh`) — aceitos em E1 porque o anel de prod é por alvo | spec E1 REQ-GRD-2 — dono: Gabriel | um dos dois visto em transcript real |
+| Classificador MCP trata `SELECT fn_que_escreve()` (RPC) como leitura — FN conhecido | review Fable spec E1 r1, MINOR 13 — dono: Gabriel | 1º RPC de escrita em transcript real |
+| [FECHADO na virada 2.0.0: o catálogo se chama `gabarito-mestre` e não há mais canal alpha] `gabarito-instalar` grava `gabarito-mestre@gabarito-mestre` e marketplace sem `#next` | review T8 GM-9, MINOR 4 — dono: Gabriel | onboarding novo em E5, ou 1ª instalação alpha por outra pessoa |
+| Caminho de `medido-em.json` em `ci.yml` sem teste: errado, deixa o job `versao-medida` vermelho e viola Q12 | re-review T8 GM-9 — dono: Gabriel | próxima mudança de `versao-medida` |
+| Classificador trata `curl -X DELETE` em host de prod como `execucao`/`mostrar` — FN declarado | plano E1, corpus `prod-curl-mostrar` — dono: Gabriel | visto em transcript real |
+| `capacidade.mjs` aplicar a fórmula de slots de S4 (custo medido com trabalho trivial; recalibrar com build/testes) | S4 GM-9 — dono: Gabriel | E2 começa |
+| Aprendizados do loop de E1: decisões D e hipóteses M em `docs/aprendizados/loop-e1.md` | ledger GM-9 R13 — dono: Gabriel | spec da entrega indicada em cada item |
+| Comparar `origin/HEAD` com `git ls-remote` fora do hook (SessionStart ou CI); medido 0,5 s | Sombra, GM-9 R14 — dono: Gabriel | 1º caso de fonte divergente em transcript |
+| `lerGuarda`: `[]` na ref vira config vazia em vez de local; sem `--no-lazy-fetch` em clone parcial; 4 mutações de forma sobrevivem | re-review T2b, MINOR 3–5 — dono: Gabriel | próxima mudança em `lerGuarda` |
+| FN de classificação declarados: `xargs`, `timeout`, `exec`, `rsync`, `find -delete`, `perl -i`, `curl -o`, chaves `{.env,x}`, heredoc | review T2 — dono: Gabriel | um deles visto em transcript real |
+| Sandbox de processo para subagent (fecha indireção em `.git`) | R14 — dono: Gabriel | forja por indireção em transcript real |
+| Diário: `dados` com `toJSON`, `new String`, `URL` escapa do canário (T4 mantém `dados` plano); oráculo aceita corte seco em 10 de 101 tamanhos; teto de 16 KB e "canário antes do lock" sem teste que falhe; `/\n+$/` quadrática com arquivo corrompido; janela stat/unlink ao quebrar lock órfão | re-review T3, M1–M4 — dono: Gabriel | próxima mudança em `diario.ts` ou 1º seq duplicado em diário real |
+| `instalar-hooks-git`: `LINHA` colada em hook `-e` bloqueia push em crash; falha de `cat` passa branch ruim sem aviso; sem teste para ramo `mktemp`, `TMPDIR` com espaço, `LINHA`; `git lfs` não medido; só macOS medido; isenções de `Merge`, `fixup!`, `Revert`, `--continue`; `-m` com `#`; bloco de versão futura | review T5, MINOR — dono: Gabriel | 1º falso bloqueio, ou repo com LFS no time |
+| Relativo sem âncora com espaço fora do anel | Q28 — dono: Gabriel | caso visto em transcrito, ou `cwd` com espaço em repo adotado |
+| `eval "…"` e `sh -c "…"` atrás de prefixo: abrir `eval` como shell | `task-7-r5-review.md` achado 2 — dono: Gabriel | caso visto em transcrito; nunca lexer novo (E17) |
+| Citação em heredoc lido como script pede (T7 r5 achado 3) | MINOR — dono: Gabriel | 1º falso positivo fora de sonda ou teste |
+| N5 viva, falta negativo em área de integridade (T7 r5 achado 4) | MINOR — dono: Gabriel | próxima mudança em `arquivoDePausa` |
+| `trash -x<arquivo>`, caminho colado em opção curta | Q26 item 2 — dono: Gabriel | caso visto em transcrito |
+| `load_medido` de 1 passagem subestima o regime (28,76 contra 39,7 a 47,3, mesma CPU, suíte 115 s). Candidato: maior mediana de 3 rodadas no degrau final | `sombra-t13b.md` — dono: Gabriel | Ao fim da 1ª entrega com loop e calibração real, sem fixture: ≥ 1 `aviso` com `carga:` e 0 gate vermelho; ou 1º adotante com suíte abaixo de 60 s |
+| Adotante sem marketplace oficial: `plugin install` rc 0 e plugin inteiro não carrega, guardas incluídas | `sombra-t13b.md` — dono: Gabriel | spec da E5, onboarding e doctor |
+| Hook R2 não vê `rm -rf` dentro de script gravado por heredoc e executado depois | E30 — dono: Gabriel | spec da E3 |

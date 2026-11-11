@@ -5,6 +5,41 @@ Usuários do plugin só recebem atualização quando `version` muda.
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-11-11
+
+Versão estável da 2.0. Quem está na 1.1.x: leia `docs/virada-2.0.md` (como atualizar, o que rodar de novo e como voltar). Resumo do que muda para quem usa:
+
+### Adicionado
+
+- **Fluxo Gabarito**: é o nome da organização do trabalho (Iniciativa, Epic e PBI) em todos os textos. A conformidade confere cards e specs contra esse fluxo.
+- **Instalação e onboarding em uma fase só**: `gabarito-instalar` detecta o que o repositório já mostra, faz uma prévia e pergunta no máximo cinco coisas (política de entrega, autonomia em produção, perfil de modelos e até duas dúvidas que a detecção não resolveu). Não há mais passos a colar no terminal. Quem veio da 1.1.x roda de novo.
+- **Perfis de modelo**: o perfil escolhido na instalação (economia, padrão ou qualidade) define o modelo de cada papel (implementador, revisor etc.). O doctor avisa quando um papel fica abaixo do recomendado.
+- **Entrega conduzida em loop** (skill `gabarito-loop`): a partir de um plano (`plano.json`), o agente despacha uma task por vez em uma worktree própria, exige review adversarial com mutações, integra e confere o CI, e registra tudo num diário da entrega. O número de tasks em paralelo vem da medição da máquina (`capacidade.mjs`); sem medição, 1.
+- **Sombra**: um agente que responde às dúvidas do loop só a partir da spec, citando a fonte, para não interromper o dono. Regra de negócio sem fonte na spec não é inventada: vira proposta de emenda, que o dono aprova ou rejeita.
+- **Spec aprovada pelo dono**: `/gabarito-mestre:aprovar` grava a aprovação (com o sha da spec; se a spec mudar, aprova de novo). Mudança de spec no meio da entrega entra por emenda (`/gabarito-mestre:emenda aprovar|rejeitar <n>`), e o limite de rodadas de review só o dono libera (`/gabarito-mestre:liberar <task>`).
+- **Painel no terminal** (precisa do mod do Claude Code): abre sozinho ao lado, em terminal largo, quando uma entrega começa. Mostra o plano, a equipe (contexto e tokens de cada agente) e o histórico, e a faixa acima do prompt traz o que depende do dono, com o comando inteiro. O que não foi medido aparece como `—`, nunca como zero. `/gabarito` lista as opções: `painel esquadrao` (detalhado), `painel executivo` (resumido), `color`/`mono`, `narracao on|off`, `nomes <pacote>`, `ligar`/`desligar`, `pausar` e `retomar`. Sem o mod, `pausar` e `retomar` continuam valendo e o painel não existe.
+- **Pouso de contexto**: o agente marca o ponto em que dá para limpar o contexto; depois do `/clear`, o resumo de início de sessão traz a linha de retomada e o loop segue de onde parou. Com o painel, isso é automático; sem ele, o agente pede ao dono, em uma linha, que digite `/clear`.
+- **Aprendizado do agente**: ao fim de um erro ou de um acerto, o agente registra a regra (ou registra que não há regra a tirar). Regras comprovadas voltam sozinhas ao resumo de início de sessão, às instruções do papel a que se destinam e à conferência de spec nova. O doctor avisa de aprendizado pendente, de papel que não existe mais e de hipótese velha.
+- **Registro de decisões**: `loop.mjs registro` gera o `registro.md` da entrega (aprovação da spec, decisões da Sombra, emendas, liberações do dono, desvios, descobertas e aprendizados), sempre igual para o mesmo histórico.
+- **Catálogo de ferramentas de planejamento**: entrada da **Mesa**, gerenciador local de projetos com servidor MCP (`mcp__mesa__*`), com card de Iniciativa e de Epic e busca do card pelo `cardTaskId`. Contribuição de Allan Rolli (PR #12).
+- **Doctor**: linhas `loop: mod ativo | sem mod` e `db: declarado | n/a`; "mod ativo" exige prova da sessão, não basta o mod existir.
+- **Base do PR da entrega**: o PR vai para a base escolhida no onboarding. Se a `main` remota ainda não tem essa escolha, a base é lida do `harness.config.json` commitado na branch, e a entrega avisa de onde ela veio. Só a base é lida da branch: as regras de produção continuam vindo da `main` remota.
+- **Push e PR sem pedir de novo**: a regra R1 do `AGENTS.md` ganha uma exceção. Com entrega por PR, a spec aprovada vale como ok para o push da branch e para abrir o PR. Merge, deploy, release e tag continuam pedindo ok. Limite: um repositório com o `AGENTS.md` da 1.1.0 só ganha a exceção ao aplicar o `AGENTS.md.novo` da 2.0.0; até lá o loop para antes do push e do PR e dá ao dono os comandos. Push e PR no modo `auto` não foram medidos.
+
+### Alterado (quebra de comportamento em relação à 1.1)
+
+- **Hook único da guarda** (`gates/dist/guarda.js`) substitui `guard-destructive.sh` e `guard-production.sh`. Ele só pede confirmação (`ask`) ou nega (`deny`) em segredo, integridade do harness e escrita em produção; comando destrutivo local vira evento no diário, sem barrar. Nunca devolve `allow`.
+- **Escape hatch removido**: as variáveis `GABARITO_ALLOW_*` deixaram de existir e nenhuma mensagem explica contorno. Para rotina de produção autorizada, use `guarda.producao.permitidos` em `harness.config.json` (lido de `origin/HEAD`).
+- **`gate-task.mjs`** confere a árvore de trabalho com arquivos novos e ignorados, independente da configuração local do git.
+- **Nome do catálogo**: o catálogo é `gabarito-mestre` (na pré-versão era `gabarito-mestre-next`). Quem testou a pré-versão deve remover o catálogo antigo (veja `docs/virada-2.0.md`).
+- Versão `2.0.0` no plugin e em `gates/package.json`.
+
+### Limites conhecidos
+
+- Os aprendizados e o `registro.md` ficam no repositório local; não chegam a um clone novo (previsto para a próxima versão).
+- A integração com ClickUp e o modo automático não foram ensaiados de ponta a ponta antes desta versão.
+- Quando 1.1.x e 2.0 ficam instaladas ao mesmo tempo com o mesmo nome, a documentação do Claude Code diz que os hooks de um deles são deixados de fora, sem dizer qual: deixe uma só.
+
 ## [1.1.0] — 2026-09-25
 
 Camada de fluxo (Workflow TRUE: Flight Levels + Kanban), onboarding na instalação, versionamento trunk-based como gate,

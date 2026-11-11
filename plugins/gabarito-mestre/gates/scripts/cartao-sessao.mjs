@@ -2,7 +2,7 @@
 /**
  * ORQ-3 — cartão de sessão.
  *
- * Camada 1 de contexto: o que o orquestrador precisa saber ao abrir a sessão, em ≤ 40 linhas —
+ * Camada 1 de contexto: o que o orquestrador precisa saber ao abrir a sessão, em ≤ 40 linhas de cartão (no hook, mais o instantâneo do diário, ≤ LIMITE_CONTEXTO caracteres = 2k tokens) —
  * modelo resolvido e validade, branch/PBI/Epic/Iniciativa (cache offline ORQ-6 ou arquivo),
  * PBIs em voo, worktrees vivos, slots medidos (PAR-1), nível do doctor em cache (DOC-2, 24 h),
  * PBIs envelhecidos (FLX-8), ponteiro LER PRIMEIRO do ledger, versão instalada × plugin e
@@ -12,40 +12,46 @@
  *
  * USO
  *   node cartao-sessao.mjs                                                       # texto do cartão
+ *   node cartao-sessao.mjs --hook                                                # SessionStart: stdin JSON → duas vias; grava diário e marcador
  *   node cartao-sessao.mjs --root <dir> --plugin-root <dir> --json --agora <ISO> # teste
  */
 
-import { readFileSync, existsSync, realpathSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { readFileSync, readdirSync, existsSync, realpathSync, lstatSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from 'node:fs';
+import { join, resolve, dirname, relative } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { arg, ehEntrypoint } from '../lib/cli.mjs';
+import { lerJson, lerGuarda } from '../lib/config.mjs';
+import { git, raizDoRepo, inferirPbi, PADROES } from '../lib/git.mjs';
+import { diasEntre } from '../lib/datas.mjs';
 import { medir, calcularSlots } from './capacidade.mjs';
 
 export const MAX_LINHAS = 40;
+/**
+ * Teto do que o hook injeta: cartão + instantâneo SOMADOS. Meta da visão (R28, item 12): contexto fixo ≤ 2.000 tokens
+ * por sessão, com instantâneo de 3.200 caracteres (~1,5k tokens). Razão medida no S7: 6.000 caracteres = 2.772 tokens.
+ * 4329 = floor(2000 × 6000 / 2772); antes era 6.000 (≈ 2.772 tokens, 39 % acima da meta). Sobram 1.129 para o cartão.
+ * O teste `T11 · teto de contexto` recalcula a conta a partir dos números do S7.
+ */
+export const LIMITE_CONTEXTO = 4329;
+export const LIMITE_MENSAGEM_LINHAS = 3;
+export const LIMITE_MENSAGEM_LINHA = 160;
+export const LINHA_REDIGIDA = '[linha redigida: possível segredo]';
 export const CACHE_DOCTOR_H = 24;
 export const DOCTOR_TIMEOUT_MS = 20_000; // o hook tem 30 s
 export const LINHA_SEM_ONBOARDING = 'GABARITO: harness sem onboarding — rode gabarito-instalar (fail-open declarado, G9)';
 export const LINHA_INDISPONIVEL = 'GABARITO: cartão indisponível — fail-open declarado (G9)';
 export const DEFAULTS = {
-  fluxo: { ferramenta: 'arquivos', idPadrao: '^[A-Z]+-\\d+$', ledgerDir: 'docs/ledgers', envelhecimentoDias: 3 },
-  versionamento: { tiposComEscopoDePbi: ['feat', 'fix', 'enabler', 'debt', 'spike', 'task', 'perf', 'refactor'] },
+  fluxo: { ferramenta: 'arquivos', idPadrao: PADROES.idPadrao, ledgerDir: 'docs/ledgers', envelhecimentoDias: 3 },
+  versionamento: { tiposComEscopoDePbi: PADROES.tiposComEscopoDePbi },
   orquestracao: { modelo: { politica: 'mais-potente', alias: '', resolvidoEm: '', validadeDias: 90 } },
 };
 
-const git = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-/** null = ausente · undefined = JSON inválido (quem chama decide o que fazer com cada um). */
-const lerJson = (f) => {
-  if (!existsSync(f)) return null;
-  try {
-    const t = readFileSync(f, 'utf8');
-    return t.trim() === '' ? {} : JSON.parse(t);
-  } catch {
-    return undefined;
-  }
-};
 const dias = (agora, iso) => {
-  const d = (agora - Date.parse(iso)) / 86_400_000;
+  // `diasEntre` aceita número (ms); aqui só vale data ISO em texto — número vira "inválido" e o modelo, VENCIDO.
+  if (typeof iso !== 'string') return null;
+  const d = diasEntre(iso, agora);
   return Number.isNaN(d) ? null : d;
 };
 /** "AAAA-MM-DD HH:MM" no fuso LOCAL da máquina (F2-R10) — nunca `toISOString()` (UTC), que
@@ -56,26 +62,14 @@ const dataHoraLocal = (ms) => {
   return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
 };
 
-export function resolverRaiz(cwd = process.cwd()) {
-  try {
-    return git(['rev-parse', '--show-toplevel'], cwd) || cwd;
-  } catch {
-    return cwd;
-  }
-}
+export const resolverRaiz = raizDoRepo;
+
+/** Caracteres de controle (inclui \n, \r, ESC) e separadores de linha Unicode viram espaço: um campo nunca vira outra linha. */
+export const limparLinha = (s) => String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ');
 
 // ────────────────────────────────────────────────────────────── puras
 
-export function inferirPbi(branch, cfg = DEFAULTS) {
-  const idRe = new RegExp(cfg?.fluxo?.idPadrao ?? DEFAULTS.fluxo.idPadrao);
-  const tipos = cfg?.versionamento?.tiposComEscopoDePbi ?? DEFAULTS.versionamento.tiposComEscopoDePbi;
-  const b = String(branch ?? '');
-  const wt = /^wt\/(.+)-(\d+)$/.exec(b);
-  if (wt && idRe.test(wt[1])) return { pbi: wt[1], n: Number(wt[2]) };
-  const m = /^([a-z]+)\/([A-Za-z]+-\d+)(?:-|$)/.exec(b);
-  if (m && tipos.includes(m[1]) && idRe.test(m[2])) return { pbi: m[2], n: null };
-  return null;
-}
+export { inferirPbi }; // movido para lib/git (mesma assinatura)
 
 /** Frontmatter YAML de uma chave por linha (`chave: valor`), sem aninhamento — é o que os templates de card usam. */
 export function lerFrontmatter(texto) {
@@ -296,11 +290,12 @@ export function montarCartao(ctx) {
   const m = ctx.config.orquestracao.modelo;
   if (m.resolvidoEm) {
     const d = dias(ctx.agora, m.resolvidoEm);
-    const restantes = d === null ? null : Math.floor(Number(m.validadeDias ?? 90) - d);
+    // data futura (> 1 d, folga de fuso) é validade forjada: vale como inválida, igual a texto e número
+    const restantes = d === null || d < -1 ? null : Math.floor(Number(m.validadeDias ?? 90) - d);
     const estado = restantes !== null && restantes >= 0 ? `${restantes} d restantes` : 'VENCIDO — revalide com gabarito-instalar';
     L.push(`Modelo: ${m.politica} · alias ${m.alias || '?'} · resolvido ${m.resolvidoEm} (${estado})`);
   } else {
-    L.push('Modelo: (b) não resolvido — gabarito-instalar (fase 4)');
+    L.push('Modelo: (b) não resolvido — gabarito-instalar (trocar orquestracao)');
   }
 
   L.push(`Branch: ${ctx.branch} @ ${ctx.sha}`);
@@ -332,24 +327,331 @@ export function montarCartao(ctx) {
   L.push(`Plugins: superpowers ${ctx.superpowers}`);
 
   // Sem `orquestracao` na config o cartão não fica mudo: diz que está em defaults (mesma frase de capacidade.mjs).
-  if (ctx.orquestracaoAusente) L.push('Config: defaults (orquestracao ausente) — gabarito-instalar (fase 4)');
+  if (ctx.orquestracaoAusente) L.push('Config: defaults (orquestracao ausente) — gabarito-instalar (trocar orquestracao)');
 
   if (ctx.avisosLedger?.length) L.push(`Avisos: ${ctx.avisosLedger.slice(0, 3).join(' · ')}${ctx.avisosLedger.length > 3 ? ` +${ctx.avisosLedger.length - 3}` : ''}`);
 
   L.push('R21: despache, não implemente. Velocidade nunca compra concorrência.');
-  return L.slice(0, MAX_LINHAS);
+  return L.slice(0, MAX_LINHAS).map(limparLinha);
 }
 
-function main(argv) {
-  const arg = (nome) => {
-    const i = argv.indexOf(`--${nome}`);
-    return i !== -1 ? argv[i + 1] : undefined;
+// ────────────────────────────────────────────────────────────── hook SessionStart (T7)
+
+const ORIGENS = new Set(['startup', 'resume', 'clear', 'compact']);
+/** Origens em que o loop pousado volta a ser lembrado: `compact` reinjeta contexto na mesma sessão, não é retomada. */
+const ORIGENS_DE_RETOMADA = new Set(['startup', 'resume', 'clear']);
+
+/** Lê o JSON de SessionStart; qualquer defeito (vazio, inválido, não-objeto) devolve entrada vazia. */
+export function interpretarEntrada(texto) {
+  try {
+    const j = JSON.parse(texto);
+    if (!j || typeof j !== 'object' || Array.isArray(j)) return { sessionId: null, origem: 'desconhecida' };
+    return {
+      sessionId: typeof j.session_id === 'string' ? j.session_id : null,
+      origem: ORIGENS.has(j.source) ? j.source : 'desconhecida',
+    };
+  } catch {
+    return { sessionId: null, origem: 'desconhecida' };
+  }
+}
+
+/** Corta em `max` unidades UTF-16 sem deixar substituto alto solto no fim. */
+export const cortar = (texto, max) => {
+  const t = texto.slice(0, max);
+  return /[\uD800-\uDBFF]$/.test(t) ? t.slice(0, -1) : t;
+};
+
+const MARCA_OMITIDAS = (n) => `... ${n} linha(s) do cartão omitida(s)`;
+/** Bloqueio ou ação pendente: o corte só chega nestas depois de esgotar as informativas. */
+const PENDENTE = /VENCIDO|\(b\) não|inválido|indisponível|sem onboarding|gabarito-instalar|\brode\b|^Avisos:|LER PRIMEIRO|BLOQUEAD|^Envelhecidos: (?!—)/;
+
+/**
+ * Cabe o cartão em `max` caracteres perdendo LINHAS INTEIRAS, nunca um pedaço de linha. Ordem de sacrifício:
+ * linha que sozinha nunca caberia; depois as informativas, do fim para o início; depois as de bloqueio ou ação pendente
+ * (mesma ordem); a 1ª linha é a última a sair. Quando algo sai, uma linha final diz quantas. Só se nem isso couber
+ * (`max` minúsculo) corta caracteres — o limite vale mais que a linha.
+ */
+export function cortarCartao(linhas, max) {
+  const junta = (ls, omitidas) => (omitidas ? [...ls, MARCA_OMITIDAS(omitidas)] : ls).join('\n');
+  if (junta(linhas, 0).length <= max) return junta(linhas, 0);
+  const manter = linhas.map(() => true);
+  let omitidas = 0;
+  const atual = () => junta(linhas.filter((_, i) => manter[i]), omitidas);
+  const solta = (i) => {
+    manter[i] = false;
+    omitidas++;
   };
-  const pluginRoot = arg('plugin-root') ? resolve(arg('plugin-root')) : resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const folga = MARCA_OMITIDAS(linhas.length).length + 1;
+  linhas.forEach((l, i) => {
+    if (l.length + folga > max) solta(i);
+  });
+  const idx = linhas.map((_, i) => i).filter((i) => manter[i]);
+  const ordem = [
+    ...idx.filter((i) => i > 0 && !PENDENTE.test(linhas[i])).reverse(),
+    ...idx.filter((i) => i > 0 && PENDENTE.test(linhas[i])).reverse(),
+    ...idx.filter((i) => i === 0),
+  ];
+  for (const i of ordem) {
+    if (atual().length <= max) break;
+    solta(i);
+  }
+  return cortar(atual(), max);
+}
+
+/** Último recurso sem `dist/diario.js` (canário indisponível): padrões de segredo comuns, para a redação nunca desligar (F5). */
+const SEGREDO_FALLBACK = /ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|\bAKIA[A-Z0-9]{12,}|\bASIA[A-Z0-9]{12,}|-----BEGIN [A-Z ]*PRIVATE|\bsk-[A-Za-z0-9]{16,}|xox[bp]-[A-Za-z0-9-]{10,}|:\/\/[^/\s:]+:[^@\s]+@|Bearer\s+[A-Za-z0-9._-]{16,}|eyJ[\w-]{20,}\.eyJ[\w-]{20,}/;
+const recusaFallback = (linha) => (SEGREDO_FALLBACK.test(linha) ? 'segredo' : null);
+
+/** Linha com algo que o canário do diário recusaria: nunca sai em nenhuma das duas vias. */
+const semSegredo = (linha, recusa) => (recusa(linha) === null ? linha : LINHA_REDIGIDA);
+
+/** Corta linhas inteiras do fim até caber em `max` caracteres; marca o corte. Cabeçalho maior que `max` ⇒ ''. */
+export function ajustarAoLimite(texto, max) {
+  if (texto.length <= max) return texto;
+  const marca = '... instantâneo truncado';
+  const linhas = texto.split('\n');
+  while (linhas.length > 1 && [...linhas, marca].join('\n').length > max) linhas.pop();
+  const saida = [...linhas, marca].join('\n');
+  return saida.length <= max ? saida : '';
+}
+
+/**
+ * Contexto do SessionStart (REQ-APR-3, REQ-POU-3). Ordem no texto: retomada, cartão, instantâneo. Ordem de corte (inverte a da E4):
+ * o cartão perde linhas inteiras primeiro (`cortarCartao`), depois o instantâneo perde linhas do fim (`ajustarAoLimite`); a retomada
+ * nunca, salvo se ela sozinha passa do limite. Sem `cortar` final: a conta já sai ≤ `limite`, e cabendo tudo a saída é a da E4.
+ */
+export function montarContexto({ cartao, instantaneo, retomada }, limite = LIMITE_CONTEXTO) {
+  const r = retomada ?? '';
+  if (r.length > limite) return cortar(r, limite);
+  const prefixo = r ? r.length + 1 : 0;
+  const i = instantaneo ?? '';
+  let c = cartao ?? '';
+  let inst = i;
+  const espacoCartao = limite - prefixo - (i ? i.length + 1 : 0);
+  if (c && c.length > espacoCartao) c = espacoCartao > 0 ? cortarCartao(c.split('\n'), espacoCartao) : '';
+  if (!c && i) {
+    const sobra = limite - prefixo - 1;
+    inst = sobra > 0 ? ajustarAoLimite(i, sobra) : '';
+  }
+  return [r, c, inst].filter((x) => x !== '').join('\n');
+}
+
+/**
+ * `.harness/heartbeat.json` (gitignored): evidência LOCAL de que o hook rodou aqui (Q20). Escrita atômica
+ * (tmp + rename; rename substitui um symlink sem segui-lo). Devolve '' se gravou, ou a mensagem do erro.
+ */
+function gravarMarcador(raiz, dados) {
+  const alvo = join(raiz, '.harness', 'heartbeat.json');
+  const tmp = join(raiz, '.harness', `heartbeat.${process.pid}.${Date.now()}.tmp`);
+  try {
+    mkdirSync(join(raiz, '.harness'), { recursive: true });
+    writeFileSync(tmp, `${JSON.stringify(dados)}\n`, { flag: 'wx', mode: 0o644 });
+    renameSync(tmp, alvo);
+    return '';
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* tmp nem chegou a existir */
+    }
+    return String(e?.message ?? e).split('\n')[0];
+  }
+}
+
+/** `events.*.jsonl` que não é arquivo regular (symlink, FIFO…): ler seguiria o link ou travaria (F3). */
+function arquivosNaoRegulares(dir) {
+  let nomes;
+  try {
+    nomes = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return nomes.filter((n) => /^events\..+\.jsonl$/.test(n)).filter((n) => {
+    try {
+      return !lstatSync(join(dir, n)).isFile();
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Os três caminhos do diário não podem ser symlink: o hook não escreve fora da árvore da entrega. */
+function caminhosSemSymlink(raiz, dir) {
+  for (const p of [join(raiz, '.harness'), join(raiz, '.harness', 'entregas'), dir]) {
+    try {
+      if (lstatSync(p).isSymbolicLink()) return false;
+    } catch {
+      /* ausente é normal: append cria */
+    }
+  }
+  return true;
+}
+
+/**
+ * Monta as duas vias do SessionStart e grava `sessao.inicio` + `guarda.heartbeat {fonte}`.
+ * Pura em relação ao processo: devolve `{ saida, falhas }`; quem chama imprime e decide o exit (sempre 0).
+ */
+export async function montarSaidaHook({ cwd, pluginRoot, agora, entradaTexto }) {
+  const falhas = [];
+  const entrada = interpretarEntrada(entradaTexto);
   let ctx;
   let linhas;
   try {
-    ctx = coletar(arg('root') ? resolve(arg('root')) : process.cwd(), pluginRoot, { agora: arg('agora') });
+    ctx = coletar(cwd, pluginRoot, { agora });
+    if (ctx.configInvalido) falhas.push('harness.config.json inválido — cartão mínimo');
+    linhas = montarCartao(ctx);
+  } catch (e) {
+    falhas.push(`cartão indisponível: ${String(e?.message ?? e).split('\n')[0]}`);
+    ctx = { erro: true, root: resolverRaiz(cwd), agora: agora ? Date.parse(agora) : Date.now() };
+    linhas = [LINHA_INDISPONIVEL];
+  }
+  const raiz = ctx.root;
+
+  let diario = null;
+  try {
+    diario = await import('../dist/diario.js');
+  } catch (e) {
+    falhas.push(`diário indisponível: ${String(e?.message ?? e).split('\n')[0]}`);
+  }
+  const recusa = diario?.recusaCanario ?? recusaFallback;
+
+  let branch = ctx.branch ?? null;
+  if (branch === null) {
+    try {
+      branch = git(['rev-parse', '--abbrev-ref', 'HEAD'], raiz);
+    } catch {
+      branch = '(sem git)';
+    }
+  }
+  const pbi = ctx.pbi ?? inferirPbi(branch, ctx.config)?.pbi ?? null;
+
+  let fonte = 'local';
+  let divergente = false;
+  try {
+    const g = lerGuarda(process.env.CLAUDE_PROJECT_DIR || raiz);
+    fonte = g.fonte === 'origin' ? 'origin' : 'local';
+    divergente = g.divergente === true;
+  } catch (e) {
+    falhas.push(`config da guarda ilegível: ${String(e?.message ?? e).split('\n')[0]}`);
+  }
+
+  let instantaneo = '';
+  let retomada = null;
+  let diarioOk = false;
+  if (diario && !ctx.semOnboarding && !ctx.erro) {
+    // Sem onboarding (ou cartão indisponível) o hook não escreve nada: o instalador ainda não ignorou `.harness/` (F1, Q20).
+    const dir = diario.dirEntrega(raiz, pbi);
+    if (!caminhosSemSymlink(raiz, dir)) {
+      falhas.push('diário em caminho com symlink — nada lido nem gravado');
+    } else {
+      try {
+        const naoRegular = arquivosNaoRegulares(dir);
+        if (naoRegular.length > 0) throw new Error(`${naoRegular[0]} não é arquivo regular — diário não lido`);
+        const eventos = diario.ler(dir);
+        // Aprendizados D da árvore inteira (REQ-APR-3): módulo próprio, para que a falha dele não derrube o diário (Sombra P1-c).
+        let aprendizados = [];
+        let avisosAprendizados = [];
+        try {
+          const apr = await import('../dist/aprendizado.js');
+          const arvore = diario.lerAprendizados(join(raiz, '.harness', 'entregas'));
+          aprendizados = apr.paraDestino(apr.aprendizadosVigentes(arvore.porEntrega), 'instantaneo');
+          avisosAprendizados = arvore.avisos;
+        } catch {
+          falhas.push('aprendizados indisponíveis');
+        }
+        if (eventos.length > 0 || aprendizados.length > 0 || avisosAprendizados.length > 0) {
+          instantaneo = diario.projetar(eventos, { aprendizados, avisosAprendizados }).instantaneo.split('\n').map((l) => semSegredo(limparLinha(l), recusa)).join('\n');
+        }
+        // Pouso sem retomada (REQ-POU-3): decidido só sobre a leitura ESTRITA; ausente ≠ corrompido. O hook não grava `sessao.retomada`.
+        if (pbi !== null && ORIGENS_DE_RETOMADA.has(entrada.origem) && existsSync(dir)) {
+          const estrito = diario.lerEstrito(dir);
+          if (!estrito.ok) falhas.push(`retomada não avaliada: ${estrito.motivo}`);
+          else if (diario.pousoSemRetomada(estrito.eventos)) retomada = `Loop da entrega ${pbi} em pouso: rode loop.mjs proxima e siga.`;
+        }
+      } catch (e) {
+        falhas.push(`leitura do diário falhou: ${String(e?.message ?? e).split('\n')[0]}`);
+      }
+      if (entrada.sessionId === null) {
+        falhas.push('stdin sem session_id — sessao.inicio e heartbeat não gravados');
+      } else {
+        let autor = 'desconhecido';
+        try {
+          autor = git(['config', 'user.email'], raiz) || autor;
+        } catch {
+          /* sem user.email: o diário aceita "desconhecido" */
+        }
+        const ts = new Date(ctx.agora).toISOString();
+        const base = { ts, autor, sessao: entrada.sessionId, agente: 'orquestrador' };
+        const eventosNovos = [
+          { ...base, tipo: 'sessao.inicio', dados: { origem: entrada.origem } },
+          { ...base, tipo: 'guarda.heartbeat', dados: { fonte, divergente } },
+        ];
+        diarioOk = true;
+        for (const ev of eventosNovos) {
+          const r = diario.append(dir, entrada.sessionId, ev);
+          if (!r.ok || r.gravado === 'recusa') {
+            diarioOk = false;
+            falhas.push(`diário recusou ${ev.tipo}: ${r.erro ?? 'canário'}`);
+            break;
+          }
+        }
+        if (diarioOk) {
+          const arquivo = relative(raiz, join(dir, `events.${entrada.sessionId}.jsonl`)).split('\\').join('/');
+          const erro = gravarMarcador(raiz, { ts, sessao: entrada.sessionId, arquivo, autor, fonte, divergente });
+          if (erro) {
+            diarioOk = false;
+            falhas.push(`marcador do heartbeat não gravado: ${erro}`);
+          }
+        }
+      }
+    }
+  }
+
+  const texto = montarContexto({
+    cartao: linhas.map((l) => semSegredo(limparLinha(l), recusa)).join('\n'),
+    instantaneo,
+    retomada: retomada === null ? null : semSegredo(limparLinha(retomada), recusa),
+  });
+
+  const mensagem = [
+    ctx.semOnboarding ? 'GABARITO · harness sem onboarding' : `GABARITO · ${branch}${pbi ? ` · ${pbi}` : ''}`,
+    `Guarda: fonte ${fonte}${divergente ? ' · config local diverge da origin' : ''}${diarioOk || ctx.semOnboarding ? '' : ' · heartbeat não gravado'}`,
+    ctx.capacidade ? `Modelo ${ctx.config.orquestracao.modelo.alias || '?'} · slots ${ctx.capacidade.slots}` : 'Cartão completo no contexto da sessão',
+  ]
+    .slice(0, LIMITE_MENSAGEM_LINHAS)
+    .map((l) => cortar(semSegredo(limparLinha(l), recusa), LIMITE_MENSAGEM_LINHA))
+    .join('\n');
+
+  const saida = { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: texto }, systemMessage: mensagem };
+  return { saida, falhas };
+}
+
+async function mainHook(argv) {
+  const pluginRoot = arg(argv, 'plugin-root') ? resolve(arg(argv, 'plugin-root')) : resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  let entradaTexto = '';
+  try {
+    entradaTexto = readFileSync(0, 'utf8');
+  } catch {
+    /* sem stdin: entrada vazia, fail-open declarado abaixo */
+  }
+  const cwd = arg(argv, 'root') ? resolve(arg(argv, 'root')) : process.cwd();
+  let resultado;
+  try {
+    resultado = await montarSaidaHook({ cwd, pluginRoot, agora: arg(argv, 'agora'), entradaTexto });
+  } catch (e) {
+    resultado = { saida: null, falhas: [`cartão indisponível: ${String(e?.message ?? e).split('\n')[0]}`] };
+  }
+  for (const f of resultado.falhas) console.error(`[ORQ-3] ${f} (fail-open declarado (G9))`);
+  if (resultado.saida) process.stdout.write(`${JSON.stringify(resultado.saida)}\n`);
+  process.exit(0); // sempre 0: falha no cartão nunca derruba a sessão
+}
+
+function main(argv) {
+  const pluginRoot = arg(argv, 'plugin-root') ? resolve(arg(argv, 'plugin-root')) : resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  let ctx;
+  let linhas;
+  try {
+    ctx = coletar(arg(argv, 'root') ? resolve(arg(argv, 'root')) : process.cwd(), pluginRoot, { agora: arg(argv, 'agora') });
     if (ctx.configInvalido) console.error('[ORQ-3] harness.config.json inválido — cartão mínimo (fail-open declarado (G9))');
     linhas = montarCartao(ctx);
   } catch (e) {
@@ -362,15 +664,8 @@ function main(argv) {
   process.exit(0);
 }
 
-// Entrypoint robusto a espaço/acento e a symlink: `file://` cru falha com %20, e comparar
-// contra `resolve(argv[1])` sem realpath falha atrás de qualquer symlink (macOS /var,
-// cache de plugin, bin do npm/homebrew) — o script sairia 0 em silêncio nos dois casos.
-function ehEntrypoint() {
-  if (!process.argv[1]) return false;
-  try {
-    return fileURLToPath(import.meta.url) === realpathSync(resolve(process.argv[1]));
-  } catch {
-    return false;
-  }
+if (ehEntrypoint(import.meta.url)) {
+  const argv = process.argv.slice(2);
+  if (argv.includes('--hook')) await mainHook(argv);
+  else main(argv);
 }
-if (ehEntrypoint()) main(process.argv.slice(2));
