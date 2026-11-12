@@ -1802,3 +1802,26 @@ describe('guarda-autonomia (pergunta fora de `perguntas`, que segue com as 3 fix
     assert.equal(temCfg(raiz), false);
   });
 });
+
+describe('guarda-autonomia: lembrete não bloqueante', () => {
+  test('lembrete-quando-falta-guarda-e-a-config-nao-tem', () => {
+    const raiz = repoVazio();
+    const r = gravarCom(raiz, FIXAS);
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.match(r.lembrete, /guarda/);
+    assert.match(r.lembrete, /trocar guarda/);
+  });
+
+  test('sem-lembrete-quando-responde-guarda', () => {
+    const r = gravarCom(repoVazio(), { ...FIXAS, guarda: 'nenhuma' });
+    assert.equal(r.ok, true);
+    assert.equal(r.lembrete, undefined);
+  });
+
+  test('sem-lembrete-quando-a-config-ja-tem-autonomia', () => {
+    const raiz = comConfig(repoVazio(), { guarda: { autonomia: 'orquestrador' } });
+    const r = gravarCom(raiz, FIXAS);
+    assert.equal(r.ok, true);
+    assert.equal(r.lembrete, undefined);
+  });
+});
