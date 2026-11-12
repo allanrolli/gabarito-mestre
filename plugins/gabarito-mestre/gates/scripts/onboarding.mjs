@@ -898,7 +898,10 @@ export function gravar(raiz, caminhoRespostas, { rodar = rodarReal, hoje = hojeI
   }
   const ef = politicaEfetiva(lerConfigEntrega(r.depois));
   const efetiva = ef.ok && ef.politica !== respostas.politica ? ef.politica : undefined;
-  return { ok: true, diff: r.diff, naoDetectado, removidas: r.removidas, ...(efetiva !== undefined ? { efetiva } : {}), ...(dryRun ? { dryRun: true } : {}) };
+  // Lembrete não bloqueante: nem a resposta nem a config têm `guarda.autonomia`; a guarda segue completa (default).
+  const semAutonomia = respostaGuarda === undefined && !AUTONOMIAS_GUARDA.includes(r.depois?.guarda?.autonomia);
+  const lembrete = semAutonomia ? 'guarda do orquestrador não perguntada: segue completa (default). Para escolher entre completa e autônoma, peça "trocar guarda".' : undefined;
+  return { ok: true, diff: r.diff, naoDetectado, removidas: r.removidas, ...(efetiva !== undefined ? { efetiva } : {}), ...(lembrete !== undefined ? { lembrete } : {}), ...(dryRun ? { dryRun: true } : {}) };
 }
 
 // ────────────────────────────────────────────────────────────── CLI
