@@ -7,7 +7,7 @@ Usuários do plugin só recebem atualização quando `version` muda.
 
 ### Corrigido
 
-- **Painel no app desktop**: ficava em "painel: lendo…" para sempre, porque o app hospeda o Claude Code via SDK (`session.start` com `isInteractive: false` e sem superfície). O painel agora passa a ler quando uma superfície se anexa (`session.attach`) ou quando a pessoa digita `/gabarito painel`. Em `-p` sem superfície nada muda: não lê.
+- **Painel no app desktop**: ficava em "painel: lendo…" para sempre, porque o app hospeda o Claude Code via SDK (`session.start` com `isInteractive: false` e sem superfície). O painel agora passa a ler quando uma superfície se anexa (`session.attach`), quando a Pane é desenhada ou o `session.start` já enxerga uma superfície (`$.session.surfaces()`), ou quando a pessoa digita `/gabarito painel`. Em `-p` sem superfície nada muda: não lê.
 
 ## [2.0.0] — 2026-11-11
 
