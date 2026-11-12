@@ -16,7 +16,6 @@ export type TipoEvento =
   | 'guarda.deny'
   | 'guarda.ask'
   | 'guarda.autonomia'
-  | 'guarda.autonomia'
   | 'sessao.inicio'
   | 'guarda.heartbeat'
   | 'diario.recusa'
